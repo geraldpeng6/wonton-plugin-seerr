@@ -103,6 +103,9 @@ ensure_session_run() {
 ensure_session() {
   local rc=0
   JAR="$(mktemp "${TMPDIR:-/tmp}/seerr-probe-jar.XXXXXX")"
+  # 钩子被 300 秒限时杀掉时也要把助手容器从插件网络断开：
+  # 它的端点会挡住实例网络删除，e2e 清理会失败（r5 实测 friendly_galileo 残留）。
+  trap 'rm -f "${JAR:-}" 2>/dev/null; helper_detach >/dev/null 2>&1' EXIT
   core_login || true
   ensure_session_run || rc=$?
   helper_detach
@@ -114,7 +117,6 @@ ensure_session() {
 # 否则冷机上 docker run 要现场拉 700MB，吃掉探针预算。
 build_images() {
   docker pull -q jellyfin/jellyfin:12.4@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771 || true
-  docker pull -q curlimages/curl:latest@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93 || true
 }
 
 # 起一台一次性 Jellyfin（官方镜像，真实服务），接到本插件网络。幂等：
@@ -132,40 +134,45 @@ ensure_jellyfin() {
 }
 
 # Jellyfin 的 Startup 向导四步要在同一个 curl 会话里做：建管理员之后，
-# 后续接口要它发给的会话 Cookie。探针主机访问不到插件网络，经网络内的临时 curl 容器执行。
-# 探针容器继承宿主 Docker 注入的代理环境后，容器名请求会被转发给宿主代理，
-# 代理解析不了 Docker 网络内的名字（502/000）——清掉代理变量再跑。
+# 后续接口要它发给的会话 Cookie。宿主机直连插件网络里容器的 IP（bridge
+# 网段宿主可达，本机实测 200），不经任何临时容器——钩子被限时杀掉时
+# 也不会在网络里留下挡删除的端点（r5 实测 friendly_galileo 残留）。
+# 探针容器曾继承宿主 Docker 注入的代理环境，容器名请求被宿主代理劫持
+# （502/000），宿主直连 + --noproxy '*' 顺带消掉这一整类问题。
 jf_setup() {
-  local net jf
+  local jf ip base jar code tries
   jf="$(jellyfin_helper_name)"
-  net="$(probe_network)" || return 1
-  docker run --rm -i --network "$net" --entrypoint /bin/sh \
-    -e http_proxy= -e https_proxy= -e HTTP_PROXY= -e HTTPS_PROXY= -e all_proxy= -e ALL_PROXY= -e no_proxy='*' \
-    -e JF_HOST="$jf" -e JF_OWNER="${SMOKE_OWNER:-owner}" curlimages/curl:latest -s <<'JF_SCRIPT' || return 1
-set -eu
-jf_wait() {
+  ensure_jellyfin || return 1
+  ip="$(docker inspect "$jf" -f '{{range $k, $v := .NetworkSettings.Networks}}{{$v.IPAddress}}{{end}}')"
+  [[ -n "$ip" ]] || { echo "拿不到 Jellyfin 助手的网络 IP"; return 1; }
+  base="http://$ip:8096"
+  jar="$(mktemp "${TMPDIR:-/tmp}/seerr-jf-jar.XXXXXX")"
   tries=0
   while :; do
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://$JF_HOST:8096/Startup/User" 2>/dev/null || true)"
-    [ "$code" = 200 ] && return 0
+    code="$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 5 "$base/Startup/User" 2>/dev/null)" || code=000
+    [ "$code" = 200 ] && break
     tries=$((tries + 1))
-    [ "$tries" -ge 70 ] && { echo "Jellyfin 210 秒内没就绪（最后 $code）"; return 1; }
+    if [ "$tries" -ge 70 ]; then
+      echo "Jellyfin 210 秒内没就绪（最后 $code）"
+      docker ps -a --filter "name=$jf" --format '{{.Names}} {{.Status}}'
+      docker logs --tail 3 "$jf" 2>&1
+      rm -f "$jar"
+      return 1
+    fi
     sleep 3
   done
-}
-jf_wait
-curl -fsS -c /tmp/jf.jar -b /tmp/jf.jar -H 'Content-Type: application/json' \
-  -d "{\"Name\":\"$JF_OWNER\",\"Password\":\"wonton-e2e-password\"}" \
-  "http://$JF_HOST:8096/Startup/User" >/dev/null
-curl -fsS -c /tmp/jf.jar -b /tmp/jf.jar -H 'Content-Type: application/json' \
-  -d '{"ServerName":"Jellyfin","UICulture":"zh-CN","MetadataCountryCode":"CN","PreferredMetadataLanguage":"zh-cn"}' \
-  "http://$JF_HOST:8096/Startup/Configuration" >/dev/null
-curl -fsS -c /tmp/jf.jar -b /tmp/jf.jar -H 'Content-Type: application/json' \
-  -d '{"EnableRemoteAccess":false}' \
-  "http://$JF_HOST:8096/Startup/RemoteAccess" >/dev/null
-curl -fsS -c /tmp/jf.jar -b /tmp/jf.jar -X POST \
-  "http://$JF_HOST:8096/Startup/Complete" >/dev/null
-JF_SCRIPT
+  curl -fsS --noproxy '*' -c "$jar" -b "$jar" -H 'Content-Type: application/json' \
+    -d "{\"Name\":\"${SMOKE_OWNER:-owner}\",\"Password\":\"wonton-e2e-password\"}" \
+    "$base/Startup/User" >/dev/null || { rm -f "$jar"; return 1; }
+  curl -fsS --noproxy '*' -c "$jar" -b "$jar" -H 'Content-Type: application/json' \
+    -d '{"ServerName":"Jellyfin","UICulture":"zh-CN","MetadataCountryCode":"CN","PreferredMetadataLanguage":"zh-cn"}' \
+    "$base/Startup/Configuration" >/dev/null || { rm -f "$jar"; return 1; }
+  curl -fsS --noproxy '*' -c "$jar" -b "$jar" -H 'Content-Type: application/json' \
+    -d '{"EnableRemoteAccess":false}' \
+    "$base/Startup/RemoteAccess" >/dev/null || { rm -f "$jar"; return 1; }
+  curl -fsS --noproxy '*' -c "$jar" -b "$jar" -X POST \
+    "$base/Startup/Complete" >/dev/null || { rm -f "$jar"; return 1; }
+  rm -f "$jar"
 }
 
 # 完成一次真实的首次登录：Jellyfin 建主人管理员 → Seerr 向导登录 → 初始化。只在未初始化时执行。
