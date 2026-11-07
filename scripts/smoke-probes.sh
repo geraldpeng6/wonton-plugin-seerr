@@ -110,17 +110,25 @@ ensure_session() {
   return "$rc"
 }
 
+# e2e 在装的时候调用（钩子的 300 秒预算之外）：把助手镜像先拉好，
+# 否则冷机上 docker run 要现场拉 700MB，吃掉探针预算。
+build_images() {
+  docker pull -q jellyfin/jellyfin:12.4@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771 || true
+  docker pull -q curlimages/curl:latest@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93 || true
+}
+
 # 起一台一次性 Jellyfin（官方镜像，真实服务），接到本插件网络。幂等：
 # 容器跨 reinstall 存活（compose 之外），网络被重建后重新接上即可。
 ensure_jellyfin() {
-  local net jf
+  local net jf out
   jf="$(jellyfin_helper_name)"
   net="$(probe_network)" || return 1
   docker ps -a --format '{{.Names}}' | grep -qx "$jf" ||
     docker run -d --name "$jf" \
       jellyfin/jellyfin:12.4@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771 \
       >/dev/null || { echo "起 Jellyfin 探针容器失败"; return 1; }
-  docker network connect "$net" "$jf" 2>/dev/null || true
+  out="$(docker network connect "$net" "$jf" 2>&1)" || [[ "$out" == *'already exists'* ]] ||
+    { echo "接入插件网络失败：$out"; return 1; }
 }
 
 # Jellyfin 的 Startup 向导四步要在同一个 curl 会话里做：建管理员之后，
@@ -141,8 +149,8 @@ jf_wait() {
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://$JF_HOST:8096/Startup/User" 2>/dev/null || true)"
     [ "$code" = 200 ] && return 0
     tries=$((tries + 1))
-    [ "$tries" -ge 60 ] && { echo "Jellyfin 120 秒内没就绪（最后 $code）"; return 1; }
-    sleep 2
+    [ "$tries" -ge 70 ] && { echo "Jellyfin 210 秒内没就绪（最后 $code）"; return 1; }
+    sleep 3
   done
 }
 jf_wait
