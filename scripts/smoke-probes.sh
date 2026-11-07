@@ -69,16 +69,16 @@ core_login() {
 ensure_session_run() {
   local res
   res="$(seerr_api /api/v1/auth/me 2>&1)"
-  if jq -e '(.username != null or .jellyfinUsername != null) and (.permissions % 4 >= 2)' <<<"$res" >/dev/null; then
+  if jq -e '(.username != null or .jellyfinUsername != null) and (.permissions % 4 >= 2)' <<<"$res" 2>/dev/null >/dev/null; then
     return 0
   fi
   core_login || return 1
   res="$(seerr_api /api/v1/auth/me 2>&1)"
-  if jq -e '(.username != null or .jellyfinUsername != null) and (.permissions % 4 >= 2)' <<<"$res" >/dev/null; then
+  if jq -e '(.username != null or .jellyfinUsername != null) and (.permissions % 4 >= 2)' <<<"$res" 2>/dev/null >/dev/null; then
     return 0
   fi
   res="$(seerr_api /api/v1/settings/public 2>&1)" || { echo "读不到 Seerr 状态：$res"; return 1; }
-  if jq -e '.initialized == false' <<<"$res" >/dev/null; then
+  if jq -e '.initialized == false' <<<"$res" 2>/dev/null >/dev/null; then
     ensure_jellyfin || return 1
     setup_seerr || return 1
   else
@@ -92,7 +92,7 @@ ensure_session_run() {
     }
   fi
   res="$(seerr_api /api/v1/auth/me 2>&1)"
-  if ! jq -e '(.username != null or .jellyfinUsername != null) and (.permissions % 4 >= 2)' <<<"$res" >/dev/null; then
+  if ! jq -e '(.username != null or .jellyfinUsername != null) and (.permissions % 4 >= 2)' <<<"$res" 2>/dev/null >/dev/null; then
     echo "登录/向导后拿不到管理员会话：$(head -c 200 <<<"$res")"
     return 1
   fi
@@ -108,6 +108,19 @@ ensure_session() {
   helper_detach
   rm -f "$JAR"
   return "$rc"
+}
+
+# 起一台一次性 Jellyfin（官方镜像，真实服务），接到本插件网络。幂等：
+# 容器跨 reinstall 存活（compose 之外），网络被重建后重新接上即可。
+ensure_jellyfin() {
+  local net jf
+  jf="$(jellyfin_helper_name)"
+  net="$(probe_network)" || return 1
+  docker ps -a --format '{{.Names}}' | grep -qx "$jf" ||
+    docker run -d --name "$jf" \
+      jellyfin/jellyfin:12.4@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771 \
+      >/dev/null || { echo "起 Jellyfin 探针容器失败"; return 1; }
+  docker network connect "$net" "$jf" 2>/dev/null || true
 }
 
 # Jellyfin 的 Startup 向导四步要在同一个 curl 会话里做：建管理员之后，
