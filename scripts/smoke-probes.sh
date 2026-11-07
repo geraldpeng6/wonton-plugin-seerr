@@ -136,45 +136,40 @@ ensure_jellyfin() {
 }
 
 # Jellyfin 的 Startup 向导四步要在同一个 curl 会话里做：建管理员之后，
-# 后续接口要它发给的会话 Cookie。宿主机直连插件网络里容器的 IP（bridge
-# 网段宿主可达，本机实测 200），不经任何临时容器——钩子被限时杀掉时
-# 也不会在网络里留下挡删除的端点（r5 实测 friendly_galileo 残留）。
-# 探针容器曾继承宿主 Docker 注入的代理环境，容器名请求被宿主代理劫持
-# （502/000），宿主直连 + --noproxy '*' 顺带消掉这一整类问题。
+# 后续接口要它发给的会话 Cookie。规范层面宿主连不上插件网络（194 实测：
+# 容器 healthy、Startup complete 5.3 秒，宿主 curl 210 秒全 000），所以
+# 全部经 docker exec 进 Jellyfin 助手容器自己 curl localhost：宿主只发
+# docker 命令，不进插件网络、不起临时容器（r5 的无名容器端点挡删除），
+# exec 随 CLI 一起死，钩子被限时杀掉也干净。会话 Cookie 存助手容器的
+# /tmp/jf.jar，四步共用。
 jf_setup() {
-  local jf ip base jar code tries
+  local jf code tries
   jf="$(jellyfin_helper_name)"
   ensure_jellyfin || return 1
-  ip="$(docker inspect "$jf" -f '{{range $k, $v := .NetworkSettings.Networks}}{{$v.IPAddress}}{{end}}')"
-  [[ -n "$ip" ]] || { echo "拿不到 Jellyfin 助手的网络 IP"; return 1; }
-  base="http://$ip:8096"
-  jar="$(mktemp "${TMPDIR:-/tmp}/seerr-jf-jar.XXXXXX")"
+  jfx() { docker exec "$jf" curl -sS --noproxy '*' -c /tmp/jf.jar -b /tmp/jf.jar "$@"; }
   tries=0
   while :; do
-    code="$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 5 "$base/Startup/User" 2>/dev/null)" || code=000
+    code="$(jfx -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:8096/Startup/User 2>/dev/null)" || code=000
     [ "$code" = 200 ] && break
     tries=$((tries + 1))
     if [ "$tries" -ge 70 ]; then
       echo "Jellyfin 210 秒内没就绪（最后 $code）"
       docker ps -a --filter "name=$jf" --format '{{.Names}} {{.Status}}'
       docker logs --tail 3 "$jf" 2>&1
-      rm -f "$jar"
       return 1
     fi
     sleep 3
   done
-  curl -fsS --noproxy '*' -c "$jar" -b "$jar" -H 'Content-Type: application/json' \
+  docker exec "$jf" rm -f /tmp/jf.jar
+  jfx -H 'Content-Type: application/json' \
     -d "{\"Name\":\"${SMOKE_OWNER:-owner}\",\"Password\":\"wonton-e2e-password\"}" \
-    "$base/Startup/User" >/dev/null || { rm -f "$jar"; return 1; }
-  curl -fsS --noproxy '*' -c "$jar" -b "$jar" -H 'Content-Type: application/json' \
+    http://localhost:8096/Startup/User >/dev/null || return 1
+  jfx -H 'Content-Type: application/json' \
     -d '{"ServerName":"Jellyfin","UICulture":"zh-CN","MetadataCountryCode":"CN","PreferredMetadataLanguage":"zh-cn"}' \
-    "$base/Startup/Configuration" >/dev/null || { rm -f "$jar"; return 1; }
-  curl -fsS --noproxy '*' -c "$jar" -b "$jar" -H 'Content-Type: application/json' \
-    -d '{"EnableRemoteAccess":false}' \
-    "$base/Startup/RemoteAccess" >/dev/null || { rm -f "$jar"; return 1; }
-  curl -fsS --noproxy '*' -c "$jar" -b "$jar" -X POST \
-    "$base/Startup/Complete" >/dev/null || { rm -f "$jar"; return 1; }
-  rm -f "$jar"
+    http://localhost:8096/Startup/Configuration >/dev/null || return 1
+  jfx -H 'Content-Type: application/json' -d '{"EnableRemoteAccess":false}' \
+    http://localhost:8096/Startup/RemoteAccess >/dev/null || return 1
+  jfx -X POST http://localhost:8096/Startup/Complete >/dev/null || return 1
 }
 
 # 完成一次真实的首次登录：Jellyfin 建主人管理员 → Seerr 向导登录 → 初始化。只在未初始化时执行。
