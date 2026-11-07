@@ -1,78 +1,96 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/geraldpeng6/wonton-docs/blob/main/develop.md#写插件。
+# Seerr：影视求片和订阅，配合 Jellyfin、Emby 或 Plex 使用。
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.7-alpine@sha256:892bb2152464f0c5d8972593a5f5afaf8054552580b699d95f8ff4af08c2d33d
+  init:
+    # 首次写入和每次重建时更新 Jellyfin 连接信息（见 init/init-settings.js）。
+    # 与主服务同一个官方镜像，避免再引入一个工具镜像。
+    image: ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
+    user: "${PUID}:${PGID}"
+    entrypoint: ["node", "/seed/init-settings.js"]
     environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
+      WONTON_JELLYFIN_URL: ${WONTON_JELLYFIN_URL:-}
+      WONTON_JELLYFIN_KEY: ${WONTON_JELLYFIN_KEY:-}
+    volumes:
+      - ${WONTON_APP_DATA}/config:/app/config
     configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      - source: init_settings
+        target: /seed/init-settings.js
+    network_mode: none
+    restart: "no"
+
+  seerr:
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    # Seerr v3.5.1 官方多架构镜像（amd64、arm64）。
+    # 官方镜像以 node 用户运行，这里跟随云吞注入的 PUID/PGID，数据目录属主与之一致。
+    image: ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
+    user: "${PUID}:${PGID}"
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ${WONTON_APP_DATA}/config:/app/config
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      # /api/v1/settings/public 是无需登录的接口，返回 200 说明数据库迁移完成、
+      # HTTP 服务已就绪；不用 /api/v1/status，它默认会请求 GitHub 检查新版本。
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5055/api/v1/settings/public"]
       interval: 30s
-      timeout: 5s
-      start_period: 30s
-      start_interval: 1s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+      start_interval: 2s
 
 configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
+  init_settings:
+    file: init/init-settings.js
 
 x-wonton:
-  spec: "0.5"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  spec: "0.6"
+  id: app.seerr.seerr
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
+  title: { en: Seerr }
+  description:
+    zh: 给家里的媒体库求片、追新剧和电影
+    en: Request movies and shows for your home media server
   icon: icon.svg
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  screenshots: [screenshots/setup.png, screenshots/login.png, screenshots/requests.png]
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://seerr.dev
+  license: MIT
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [视频, 追剧, 求片]
+    en: [Video, TV, Requests]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      在 Seerr 里搜索想看的电影和剧集，一键求片；媒体库有了就通知你。
+
+      Seerr 连接 Jellyfin、Emby 或 Plex：第一次打开需要完成 Seerr 自己的向导，
+      填媒体服务器地址，并用它的管理员账号登录——这个账号随之成为 Seerr 管理员。
+      之后家人用各自媒体服务器账号登录就能求片。
+
+      连接 Jellyfin 的地址和 API 密钥由云吞自动注入（核心的能力依赖接口上线后生效），
+      在那之前要手填一台 Seerr 能访问到的媒体服务器地址。
+
+      出网权限用于查询 TMDB 的影视元数据和海报。想全自动下载，还要在设置里
+      连接 Radarr 或 Sonarr（以及下载器），这一步按 Seerr 自己的文档配置。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      Search for movies and shows in Seerr and request them with one tap; get notified when they land in your library.
+
+      Seerr connects to Jellyfin, Emby or Plex. The first opening runs Seerr's own setup wizard: enter the media server address and sign in with an administrator account of that server — that account becomes the Seerr administrator. Family members then sign in with their own media server accounts to request titles.
+
+      The Jellyfin address and API key are injected automatically by Wonton (effective once the core's capability dependency interface ships); until then, enter an address that Seerr can reach.
+
+      The internet permission is used for TMDB metadata and posters. For fully automatic downloading, connect Radarr or Sonarr (plus a downloader) in the settings, following Seerr's own documentation.
+  release_notes: { zh: 首次发布 Seerr 3.5.1 插件。, en: First Seerr 3.5.1 plugin release. }
   webui:
-    service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/geraldpeng6/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  # 能放到底栏的页面，见 https://github.com/geraldpeng6/wonton-docs/blob/main/plugin-spec.md#底栏页面tabs。放不放由用户决定。
-  tabs:
-    - id: home
-      title: { zh: 主页, en: Home }
-      icon: tabs/home.svg
-      icon_selected: tabs/home-fill.svg
-      path: /
-      # 这个页面没做适配，用默认的 inset：页面夹在 App 的栏中间，不会被挡。
-      # 想让内容从栏下滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出栏的位置。
-  permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+    service: seerr
+    port: 5055
+    sso: none
+  permissions:
+    # TMDB 元数据、海报、版本检查都走外网。
+    - network.egress
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    # 上游没写最低内存；官方镜像空载实测 131MiB，扫描媒体库和缓存海报按三倍余量取整。
+    memory: 512M
