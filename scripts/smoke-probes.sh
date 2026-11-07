@@ -105,7 +105,9 @@ ensure_session() {
   JAR="$(mktemp "${TMPDIR:-/tmp}/seerr-probe-jar.XXXXXX")"
   # 钩子被 300 秒限时杀掉时也要把助手容器从插件网络断开：
   # 它的端点会挡住实例网络删除，e2e 清理会失败（r5 实测 friendly_galileo 残留）。
+  # run_hook 发的是 TERM，bash 不捕获 TERM 就不会跑 EXIT 清理，两个都要挂。
   trap 'rm -f "${JAR:-}" 2>/dev/null; helper_detach >/dev/null 2>&1' EXIT
+  trap 'rm -f "${JAR:-}" 2>/dev/null; helper_detach >/dev/null 2>&1; exit 124' TERM
   core_login || true
   ensure_session_run || rc=$?
   helper_detach
