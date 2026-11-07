@@ -58,10 +58,11 @@ seerr_api() {
   dweb --jar "$JAR" "$p" -H 'Content-Type: application/json' "$@"
 }
 
-# 网关会话失效时自己补一次登录（dweb＝dev.sh web，自己完成核心登录跳转并把
-# 会话写进 --jar；脚手架已做过也会重做，幂等）。
+# 网关会话失效时自己补一次登录。--fresh 必须带上：session_into 见 jar 文件存在
+# （哪怕是刚 mktemp 的空文件）就直接跳过登录，不带网关会话的请求只会拿到
+# 网关的错误体，jq 解析才报 Invalid numeric literal。
 core_login() {
-  dweb --jar "$JAR" / >/dev/null 2>&1
+  dweb --jar "$JAR" --fresh / >/dev/null 2>&1
 }
 
 # 会话与身份的公共前置：网关会话有效就用；没初始化就先走一遍真实向导；初始化过就重新登录。
@@ -102,6 +103,7 @@ ensure_session_run() {
 ensure_session() {
   local rc=0
   JAR="$(mktemp "${TMPDIR:-/tmp}/seerr-probe-jar.XXXXXX")"
+  core_login || true
   ensure_session_run || rc=$?
   helper_detach
   rm -f "$JAR"
