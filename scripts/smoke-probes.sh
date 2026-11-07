@@ -100,18 +100,22 @@ ensure_session_run() {
 
 # 包装：无论成功失败、走到哪个 return，探针容器都不留在插件网络上——
 # 网络有活动端点时 Docker 拒绝卸载重建，smoke 的 reinstall 会失败。
+#
+# jar 固定名字、跨项保留到 shell 退出：调用方在 ensure_session 返回后还要用它发请求
+# （identity_check 的 /auth/me、data_write 的建用户），删掉就只剩网关会话、应用回 401
+# cookie required。每项开头重建空的，core_login 带 --fresh 强制重新登录。
 ensure_session() {
   local rc=0
-  JAR="$(mktemp "${TMPDIR:-/tmp}/seerr-probe-jar.XXXXXX")"
+  JAR="${TMPDIR:-/tmp}/seerr-probe-jar.$$"
   # 钩子被 300 秒限时杀掉时也要把助手容器从插件网络断开：
   # 它的端点会挡住实例网络删除，e2e 清理会失败（r5 实测 friendly_galileo 残留）。
   # run_hook 发的是 TERM，bash 不捕获 TERM 就不会跑 EXIT 清理，两个都要挂。
   trap 'rm -f "${JAR:-}" 2>/dev/null; helper_detach >/dev/null 2>&1' EXIT
   trap 'rm -f "${JAR:-}" 2>/dev/null; helper_detach >/dev/null 2>&1; exit 124' TERM
+  rm -f "$JAR"
   core_login || true
   ensure_session_run || rc=$?
   helper_detach
-  rm -f "$JAR"
   return "$rc"
 }
 
