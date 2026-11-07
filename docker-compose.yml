@@ -44,7 +44,7 @@ configs:
     file: init/init-settings.js
 
 x-wonton:
-  spec: "0.6"
+  spec: "0.7"
   id: app.seerr.seerr
   version: 0.1.0
   kind: app
