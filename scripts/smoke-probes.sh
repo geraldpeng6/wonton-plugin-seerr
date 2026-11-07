@@ -125,11 +125,14 @@ ensure_jellyfin() {
 
 # Jellyfin 的 Startup 向导四步要在同一个 curl 会话里做：建管理员之后，
 # 后续接口要它发给的会话 Cookie。探针主机访问不到插件网络，经网络内的临时 curl 容器执行。
+# 探针容器继承宿主 Docker 注入的代理环境后，容器名请求会被转发给宿主代理，
+# 代理解析不了 Docker 网络内的名字（502/000）——清掉代理变量再跑。
 jf_setup() {
   local net jf
   jf="$(jellyfin_helper_name)"
   net="$(probe_network)" || return 1
   docker run --rm -i --network "$net" --entrypoint /bin/sh \
+    -e http_proxy= -e https_proxy= -e HTTP_PROXY= -e HTTPS_PROXY= -e all_proxy= -e ALL_PROXY= -e no_proxy='*' \
     -e JF_HOST="$jf" -e JF_OWNER="${SMOKE_OWNER:-owner}" curlimages/curl:latest -s <<'JF_SCRIPT' || return 1
 set -eu
 jf_wait() {
