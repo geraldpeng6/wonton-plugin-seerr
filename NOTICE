@@ -1,14 +1,20 @@
 图标
 ====
 
-`icon.svg` 为本仓库原创，按插件规范的线条风格手写，未用图片模型生成。从模板新建的插件换成自己的图标时，这里按实际情况重写。
+`icon.svg` 使用 Seerr 仓库的官方标志 `public/os_icon.svg`（来源：
+https://github.com/seerr-team/seerr ，检出于 v3.5.1），原样缩放放在白色满幅底色上，
+未改色、未变形。
+
+Seerr 名称与标志是 Seerr 项目及其社区的商标；本插件不代表 Seerr 官方出品、合作或背书。
 
 许可证
 ------
 
+Seerr 标志随 Seerr 项目分发，以下是其许可证全文（MIT）：
+
 MIT License
 
-Copyright (c) 2026 Wonton plugin authors
+Copyright (c) 2020 sct
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
