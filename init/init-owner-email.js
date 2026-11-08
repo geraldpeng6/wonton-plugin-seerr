@@ -58,9 +58,21 @@ const api = async (p, opts = {}) => {
 };
 
 (async () => {
+  // API 密钥只在库里已有主人账号（user 1）时才被认成这个人；向导没走完时库里没有
+  // 用户，带密钥的请求也一律 403。所以先用无需认证的 /settings/public 判断该不该动。
+  const pub = await api('/settings/public');
+  if (pub.status !== 200) {
+    console.error(`读 Seerr 公开设置失败：HTTP ${pub.status} ${pub.text}`);
+    process.exit(1);
+  }
+  if (!pub.body?.initialized) {
+    console.log('向导还没走完（应用未初始化），这次不改邮箱');
+    process.exit(0);
+  }
+
   const cur = await api('/user/1/settings/main');
   if (cur.status === 404) {
-    console.log('还没有主人账号（向导没走完），这次不改邮箱');
+    console.log('应用已初始化但读不到主人账号，这次不改邮箱');
     process.exit(0);
   }
   if (cur.status !== 200) {
