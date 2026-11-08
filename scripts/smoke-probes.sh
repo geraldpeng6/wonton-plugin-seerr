@@ -140,7 +140,7 @@ ensure_jellyfin() {
 }
 
 # Jellyfin 的 Startup 向导四步要在同一个 curl 会话里做：建管理员之后，
-# 后续接口要它发给的会话 Cookie。规范层面宿主连不上插件网络（194 实测：
+# 后续接口要它发给的会话 Cookie。规范层面宿主连不上插件网络（实测：
 # 容器 healthy、Startup complete 5.3 秒，宿主 curl 210 秒全 000），所以
 # 全部经 docker exec 进 Jellyfin 助手容器自己 curl localhost：宿主只发
 # docker 命令，不进插件网络、不起临时容器（r5 的无名容器端点挡删除），
