@@ -244,6 +244,7 @@ ss_room_wait() { # <超时秒> <要找的文字>：等主人的「Wonton」私�
 	core="$(ss_core)" || return 1
 	dd="$(ss_dd)"
 	dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	# shellcheck disable=SC2016 # 单引号里是子进程 bash 的变量，$1/$2/$3 是 bash -c 的位置参数
 	env SMOKE_CORE="$core" SMOKE_DATA_DIR="$dd" SMOKE_OWNER="${SMOKE_OWNER:-owner}" \
 		bash -c 'source "$1/lib.sh" && source "$1/probes.sh" && probes_owner_room_wait "$2" "$3"' \
 		_ "$dir" "$1" "$2"
@@ -261,7 +262,7 @@ extra_check() { # 发信端到端：主人邮箱先对齐成内部邮箱（插�
 	# 主人邮箱不是内部邮箱时先对齐（和应用 init-mail 同一份对账：只回传接口会覆盖的字段）。
 	cur="$(seerr_api /api/v1/user/1/settings/main -H "X-API-Key: $key")" ||
 		{ echo "读主人设置失败：$(head -c 200 <<<"$cur")"; return 1; }
-	if [[ "$(jq -r '.email // ""' <<<"$cur" | tr 'A-Z' 'a-z')" != "$to" ]]; then
+	if [[ "$(jq -r '.email // "" | ascii_downcase' <<<"$cur")" != "$to" ]]; then
 		payload="$(jq -c --arg to "$to" '{email:$to} +
 			with_entries(select(.key as $k | ["username","locale","discoverRegion","streamingRegion","originalLanguage","watchlistSyncMovies","watchlistSyncTv"] | index($k)) | select(.value != null))' <<<"$cur")"
 		code="$(curl -sS --noproxy '*' -b "$JAR" -H "X-API-Key: $key" -H 'Content-Type: application/json' \
