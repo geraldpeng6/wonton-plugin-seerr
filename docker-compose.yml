@@ -73,10 +73,10 @@ x-wonton:
   id: app.seerr.seerr
   version: 0.2.0
   kind: app
-  title: { en: Seerr }
+  title: { zh: 求片点播（Seerr）, en: Movie & TV Requests (Seerr) }
   description:
-    zh: 给家里的媒体库求片、追新剧和电影
-    en: Request movies and shows for your home media server
+    zh: 像给家庭影院“点单”：搜到想看的电影或剧集一键求片，片子进了 Jellyfin 等影库就通知你。它自己不播放也不下载，要配合家庭影院用。
+    en: "Like ordering for your home theater: find a movie or show, request it with one tap, and get a heads-up when it lands in Jellyfin or another library. It doesn't play or download anything itself."
   icon: icon.svg
   notices: [NOTICE]
   screenshots: [screenshots/setup.png, screenshots/login.png, screenshots/requests.png]
