@@ -1,7 +1,7 @@
 # Seerr：影视求片和订阅，配合 Jellyfin、Emby 或 Plex 使用。
 services:
   init:
-    # 首次写入和每次重建时更新 Jellyfin 连接信息（见 init/init-settings.js）。
+    # 首次写入和每次重建时更新 Jellyfin 连接信息和发信配置（见 init/init-settings.js）。
     # 与主服务同一个官方镜像，避免再引入一个工具镜像。
     image: ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
     user: "${PUID}:${PGID}"
@@ -9,6 +9,9 @@ services:
     environment:
       WONTON_JELLYFIN_URL: ${WONTON_JELLYFIN_URL:-}
       WONTON_JELLYFIN_KEY: ${WONTON_JELLYFIN_KEY:-}
+      WONTON_SMTP_HOST: ${WONTON_SMTP_HOST:-}
+      WONTON_SMTP_PORT: ${WONTON_SMTP_PORT:-}
+      WONTON_MAIL_FROM: ${WONTON_MAIL_FROM:-}
     volumes:
       - ${WONTON_APP_DATA}/config:/app/config
     configs:
@@ -39,14 +42,36 @@ services:
       start_period: 60s
       start_interval: 2s
 
+  # Seerr 的用户邮箱来自向导里媒体服务器登录表单，常常不是能收信的地址；通知和找回密码
+  # 都发到它。应用建号之后不会再自己改，所以每次重建容器用 Seerr 自己的接口对齐一次：
+  # 已是内部邮箱就不动，改不动就退出报错（见 init/init-owner-email.js）。
+  init-mail:
+    depends_on:
+      seerr:
+        condition: service_healthy
+    image: ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
+    user: "${PUID}:${PGID}"
+    entrypoint: ["node", "/seed/init-owner-email.js"]
+    environment:
+      WONTON_OWNER_EMAIL: ${WONTON_OWNER_EMAIL:-}
+    volumes:
+      # 只读挂载：从 settings.json 拿接口认证用的 API 密钥。
+      - ${WONTON_APP_DATA}/config:/app/config:ro
+    configs:
+      - source: init_owner_email
+        target: /seed/init-owner-email.js
+    restart: "no"
+
 configs:
   init_settings:
     file: init/init-settings.js
+  init_owner_email:
+    file: init/init-owner-email.js
 
 x-wonton:
-  spec: "0.7"
+  spec: "0.11"
   id: app.seerr.seerr
-  version: 0.1.0
+  version: 0.2.0
   kind: app
   title: { en: Seerr }
   description:
@@ -72,6 +97,9 @@ x-wonton:
       连接 Jellyfin 的地址和 API 密钥由云吞自动注入（核心的能力依赖接口上线后生效），
       在那之前要手填一台 Seerr 能访问到的媒体服务器地址。
 
+      Seerr 发的信（找回密码、求片进展、初始密码）会出现在收件人的云吞“Wonton”私聊里。
+      只能发给家里的人：收件人填的是外部地址（比如 Plex 账号的邮箱）时发送失败。
+
       出网权限用于查询 TMDB 的影视元数据和海报。想全自动下载，还要在设置里
       连接 Radarr 或 Sonarr（以及下载器），这一步按 Seerr 自己的文档配置。
     en: |
@@ -81,8 +109,14 @@ x-wonton:
 
       The Jellyfin address and API key are injected automatically by Wonton (effective once the core's capability dependency interface ships); until then, enter an address that Seerr can reach.
 
+      Email that Seerr sends (password resets, request updates, initial passwords) shows up in the recipient's Wonton chat. It only reaches people in your home: sending to an external address (such as a Plex account email) fails.
+
       The internet permission is used for TMDB metadata and posters. For fully automatic downloading, connect Radarr or Sonarr (plus a downloader) in the settings, following Seerr's own documentation.
-  release_notes: { zh: 首次发布 Seerr 3.5.1 插件。, en: First Seerr 3.5.1 plugin release. }
+  release_notes:
+    zh: 接上云吞内部邮箱：Seerr 发的邮件转进收件人的云吞私聊；主人账号的邮箱在重建容器时自动改成云吞内部邮箱。
+    en: >-
+      Connect to Wonton's internal mailbox: email that Seerr sends lands in the recipient's Wonton chat,
+      and the owner account's email is switched to the Wonton internal address when the container is recreated.
   webui:
     service: seerr
     port: 5055
@@ -90,6 +124,10 @@ x-wonton:
   permissions:
     # TMDB 元数据、海报、版本检查都走外网。
     - network.egress
+    # 应用自己发信（找回密码、求片通知、建号初始密码）：核心提供 SMTP，信转进收件人的私聊。
+    - notify
+    # 一次性初始化要把主人账号的邮箱改成主人的内部邮箱（WONTON_OWNER_EMAIL）。
+    - owner.identity
   requirements:
     arch: [amd64, arm64]
     # 上游没写最低内存；官方镜像空载实测 131MiB，扫描媒体库和缓存海报按三倍余量取整。
