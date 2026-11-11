@@ -1,6 +1,6 @@
 # Seerr 求片插件
 
-开发流程见[插件开发指南](https://github.com/geraldpeng6/wonton-docs/blob/main/develop.md)。
+开发流程见[插件开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md)。
 
 Seerr 是影视求片和订阅工具：搜索想看的电影和剧集，一键求片，媒体库入库后收到通知。它连接 Jellyfin、Emby 或 Plex 作为媒体库来源；本插件面向已装（或将要装）云吞 Jellyfin 插件的场景。
 
