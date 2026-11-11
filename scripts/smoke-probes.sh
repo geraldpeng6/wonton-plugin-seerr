@@ -225,3 +225,78 @@ data_check() {
     echo "升级/重装后找不到 wonton-smoke-member：$(head -c 200 <<<"$res")"; return 1; }
   helper_detach
 }
+
+# ---------- 发信（notify，规范 0.11）----------
+ss_core() { # 核心容器：Mailpit 的别名和 API 密码都在它的网络上/数据目录里
+	local inst
+	inst="$(probe_instance)" || return 1
+	docker ps --format '{{.Names}}' | grep -xE "wonton-${inst}--core" | head -1
+}
+
+ss_mailpit() { # <path>：调 Mailpit API（basic core:<密码>）。主路照核心自己的冒烟：在核心网络里
+	# 打 mailpit.wonton.internal:8025；兜底用应用容器的 wget（它的网络里也有这个别名）。
+	local core pw dd out webc
+	core="$(ss_core)" || return 1
+	if declare -F read_env >/dev/null; then dd="$(read_env WONTON_DATA_DIR)"; else dd="$(probes_setting WONTON_DATA_DIR)"; fi
+	pw="$(docker exec "$core" cat "$dd/core/mailpit/api-password" 2>/dev/null)"
+	[[ -n "${pw:-}" ]] || { echo "读不到 Mailpit API 密码（核心数据目录 core/mailpit/api-password）"; return 1; }
+	out="$(docker run --rm --network "container:$core" curlimages/curl:8.23.0 \
+		-s -u "core:$pw" "http://mailpit.wonton.internal:8025$1" 2>&1)"
+	if jq -e '.messages' <<<"$out" >/dev/null 2>&1 || [[ "$out" == "{"* ]]; then
+		printf '%s' "$out"; return 0
+	fi
+	webc="$(probe_container)" || return 1
+	docker exec "$webc" wget -qO- --header "Authorization: Basic $(printf 'core:%s' "$pw" | base64 | tr -d '\n')" \
+		"http://smtp.wonton.internal:8025$1" 2>&1
+}
+
+ss_mailpit_wait() { # <jq 过滤> [次数=20]：轮询 Mailpit 直到过滤命中
+	local filt="$1" n="${2:-20}" i out
+	for ((i = 0; i < n; i++)); do
+		out="$(ss_mailpit "/api/v1/messages?limit=100")" || { sleep 3; continue; }
+		jq -e "$filt" <<<"$out" >/dev/null 2>&1 && return 0
+		sleep 3
+	done
+	return 1
+}
+
+extra_check() { # 发信端到端：主人邮箱先对齐成内部邮箱（插件每次重建容器都做的那件事），
+	# 再用设置页同款的测试信接口真发一封，核心投进主人私聊后从 Mailpit 取走删除
+	local webc key cur payload code to
+	to="${SMOKE_OWNER:-owner}@wonton.internal"
+	ensure_session || return 1
+	webc="$(probe_container)" || return 1
+	key="$(docker exec "$webc" node -e 'console.log(require("/app/config/settings.json").main?.apiKey ?? "")')" ||
+		{ echo "读不到应用 API 密钥（settings.json 的 main.apiKey）"; return 1; }
+	[[ -n "$key" ]] || { echo "应用 API 密钥是空的"; return 1; }
+	# 主人邮箱不是内部邮箱时先对齐（和应用 init-mail 同一份对账：只回传接口会覆盖的字段）。
+	cur="$(seerr_api /api/v1/user/1/settings/main -H "X-API-Key: $key")" ||
+		{ echo "读主人设置失败：$(head -c 200 <<<"$cur")"; return 1; }
+	if [[ "$(jq -r '.email // ""' <<<"$cur" | tr 'A-Z' 'a-z')" != "$to" ]]; then
+		payload="$(jq -c --arg to "$to" '{email:$to} +
+			with_entries(select(.key as $k | ["username","locale","discoverRegion","streamingRegion","originalLanguage","watchlistSyncMovies","watchlistSyncTv"] | index($k)) | select(.value != null))' <<<"$cur")"
+		code="$(curl -sS --noproxy '*' -b "$JAR" -H "X-API-Key: $key" -H 'Content-Type: application/json' \
+			-o /dev/null -w '%{http_code}' -X POST -d "$payload" "${SMOKE_WEB_URL%/}/api/v1/user/1/settings/main")" ||
+			code=000
+		[[ "$code" == 200 ]] || { echo "对齐主人邮箱失败（HTTP $code）"; return 1; }
+		echo "主人邮箱已对齐成 $to"
+	fi
+	# 测试信走应用自己的 Email 通知代理：settings.json 里 init 写好的 SMTP（内部邮箱、明文不认证）。
+	local agent
+	agent="$(seerr_api /api/v1/settings/notifications/email -H "X-API-Key: $key")" ||
+		{ echo "读邮件通知配置失败：$(head -c 200 <<<"$agent")"; return 1; }
+	code="$(curl -sS --noproxy '*' -b "$JAR" -H "X-API-Key: $key" -H 'Content-Type: application/json' \
+		-o /dev/null -w '%{http_code}' -X POST -d "$agent" "${SMOKE_WEB_URL%/}/api/v1/settings/notifications/email/test")" ||
+		code=000
+	[[ "$code" == 204 ]] || { echo "测试信请求 HTTP $code（应用对内部收件人也报失败？）"; return 1; }
+	# 信进内部邮箱：From 是 WONTON_MAIL_FROM（app.seerr.seerr@plugins.wonton.internal）。
+	ss_mailpit_wait "$(jq -n --arg to "$to" \
+		'.messages | any(.From.Address == "app.seerr.seerr@plugins.wonton.internal" and any(.To[].Address == $to))')" 20 ||
+		{ echo "测试信 60 秒没进 Mailpit：$(ss_mailpit '/api/v1/messages?limit=5' | head -c 300)"; return 1; }
+	echo "测试信已进内部邮箱（To=$to）"
+	# 核心投进收件人私聊后把信从 Mailpit 删掉：信箱里没有这封信 = 已投递。
+	ss_mailpit_wait "$(jq -n --arg to "$to" \
+		'(.messages | map(select(.To[].Address == $to)) | length) == 0')" 20 ||
+		{ echo "测试信一直留在 Mailpit：核心没把它投进主人私聊（投完才会删）"; return 1; }
+	echo "核心已把信投进主人的 Wonton 私聊（Mailpit 里已删除）"
+}
