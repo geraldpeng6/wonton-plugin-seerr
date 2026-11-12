@@ -33,6 +33,15 @@ jellyfin_helper_name() {
   printf 'seerr-probe-jellyfin-%s' "$SMOKE_INSTANCE"
 }
 
+# Seerr 访问助手用的名字。核心配了出口代理时给插件容器注入 HTTP_PROXY，NO_PROXY 只认
+# .wonton.internal、回环和 compose 里的服务名；助手容器在 compose 之外，用它的容器名会被
+# 送进出站代理，而代理不在插件网络里，解析不了这个名字（CI 实测两次尝试都 503，Seerr 把
+# 非 401 的登录失败兜底成 500 "Something went wrong."）。挂一个以 .wonton.internal 结尾的
+# 网络别名让 Seerr 直连，Docker 的内嵌 DNS 在插件网络上解析它，与出口代理无关。
+jellyfin_helper_host() {
+  printf '%s.wonton.internal' "$(jellyfin_helper_name)"
+}
+
 # 探针容器不能一直挂在插件网络上：网络有活动端点时 Docker 拒绝卸载/重建插件
 # （"network has active endpoints"），smoke 的 reinstall 会失败。用完就断开。
 helper_detach() {
@@ -130,7 +139,7 @@ ensure_jellyfin() {
     docker run -d --name "$jf" --label "wonton.instance=$SMOKE_INSTANCE" \
       jellyfin/jellyfin:12.4@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771 \
       >/dev/null || { echo "起 Jellyfin 探针容器失败"; return 1; }
-  out="$(docker network connect "$net" "$jf" 2>&1)" || [[ "$out" == *'already exists'* ]] ||
+  out="$(docker network connect --alias "$(jellyfin_helper_host)" "$net" "$jf" 2>&1)" || [[ "$out" == *'already exists'* ]] ||
     { echo "接入插件网络失败：$out"; return 1; }
 }
 
@@ -209,7 +218,7 @@ jf_setup() {
 setup_seerr() {
   local res body
   jf_setup || return 1
-  body="$(jq -nc --arg u "$SMOKE_OWNER" --arg h "$(jellyfin_helper_name)" \
+  body="$(jq -nc --arg u "$SMOKE_OWNER" --arg h "$(jellyfin_helper_host)" \
     '{username:$u,password:"wonton-e2e-password",hostname:$h,port:8096,useSsl:false,urlBase:"",email:($u + "@example.com"),serverType:2}')"
   res="$(seerr_api /api/v1/auth/jellyfin -d "$body" 2>&1)" || {
     echo "Seerr 向导登录失败：$(head -c 200 <<<"${res:-空响应}")"; return 1;
