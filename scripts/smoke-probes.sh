@@ -246,7 +246,9 @@ extra_check() { # 发信端到端：主人邮箱先对齐成内部邮箱（插�
 		echo "主人邮箱已对齐成 $to"
 	fi
 	# 等待先挂后台再触发（套件的用法）：信进私聊是秒级投递，先等后发才等得到。
-	probes_owner_room_wait 120 "Seerr：" & wp=$!
+	# 按信的主题找，不按前缀找：核心给消息加的前缀是应用的显示名（“求片点播（Seerr）：”），
+	# 改名就对不上；主题是上游测试信自己写的。
+	probes_owner_room_wait 120 "Test Notification [Seerr]" & wp=$!
 	# 测试信走应用自己的 Email 通知代理：settings.json 里 init 写好的 SMTP（内部邮箱、明文不认证）。
 	local agent
 	agent="$(seerr_api /api/v1/settings/notifications/email -H "X-API-Key: $key")" ||
@@ -257,5 +259,5 @@ extra_check() { # 发信端到端：主人邮箱先对齐成内部邮箱（插�
 	[[ "$code" == 204 ]] || { kill "$wp" 2>/dev/null; wait "$wp" 2>/dev/null; echo "测试信请求 HTTP $code（应用对内部收件人也报失败？）"; return 1; }
 	# 核心把信投进主人的「Wonton」私聊：房里出现这一封。
 	wait "$wp" || { echo "测试信 120 秒没出现在主人的 Wonton 私聊（房里没这封信）"; return 1; }
-	echo "测试信已进主人的 Wonton 私聊（Seerr：…，收件人 $to）"
+	echo "测试信已进主人的 Wonton 私聊（Test Notification [Seerr]，收件人 $to）"
 }
