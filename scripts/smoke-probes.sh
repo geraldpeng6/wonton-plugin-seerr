@@ -33,6 +33,15 @@ jellyfin_helper_name() {
   printf 'seerr-probe-jellyfin-%s' "$SMOKE_INSTANCE"
 }
 
+# Seerr 访问助手用的名字。核心配了出口代理时给插件容器注入 HTTP_PROXY，NO_PROXY 只认
+# .wonton.internal、回环和 compose 里的服务名；助手容器在 compose 之外，用它的容器名会被
+# 送进出站代理，而代理不在插件网络里，解析不了这个名字（CI 实测两次尝试都 503，Seerr 把
+# 非 401 的登录失败兜底成 500 "Something went wrong."）。挂一个以 .wonton.internal 结尾的
+# 网络别名让 Seerr 直连，Docker 的内嵌 DNS 在插件网络上解析它，与出口代理无关。
+jellyfin_helper_host() {
+  printf '%s.wonton.internal' "$(jellyfin_helper_name)"
+}
+
 # 探针容器不能一直挂在插件网络上：网络有活动端点时 Docker 拒绝卸载/重建插件
 # （"network has active endpoints"），smoke 的 reinstall 会失败。用完就断开。
 helper_detach() {
@@ -130,7 +139,7 @@ ensure_jellyfin() {
     docker run -d --name "$jf" --label "wonton.instance=$SMOKE_INSTANCE" \
       jellyfin/jellyfin:12.4@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771 \
       >/dev/null || { echo "起 Jellyfin 探针容器失败"; return 1; }
-  out="$(docker network connect "$net" "$jf" 2>&1)" || [[ "$out" == *'already exists'* ]] ||
+  out="$(docker network connect --alias "$(jellyfin_helper_host)" "$net" "$jf" 2>&1)" || [[ "$out" == *'already exists'* ]] ||
     { echo "接入插件网络失败：$out"; return 1; }
 }
 
@@ -141,41 +150,59 @@ ensure_jellyfin() {
 # docker 命令，不进插件网络、不起临时容器（无名的临时容器会挡实例网络删除），
 # exec 随 CLI 一起死，探针被限时杀掉也干净。会话 Cookie 存助手容器的
 # /tmp/jf.jar，四步共用。
+#
+# 建号等四步每步核对状态码：请求坏了当场报错，不能让 Seerr 拿着不存在的账号
+# 去登录。助手容器跨探针复用：/Startup/User 回 401 说明向导早已完成（向导的
+# Startup/Complete 一旦走过就不会回头），跳过四步直接算就绪；不改这里的话，
+# 一次向导登录失败会让后面每项探针都白等 210 秒再失败（#16 的 CI 实测三项连红）。
 jf_setup() {
-  local jf code tries
+  local jf code deadline
   jf="$(jellyfin_helper_name)"
   ensure_jellyfin || return 1
   jfx() { docker exec "$jf" curl -sS --noproxy '*' -c /tmp/jf.jar -b /tmp/jf.jar "$@"; }
-  tries=0
+  # 向导一步：jfx_post <路径> <curl 参数…>，2xx 算过，其他把状态和响应体开头报出来。
+  jfx_post() {
+    local path="$1" c out
+    shift
+    out="$(jfx -o /dev/stdout -w '\n%{http_code}' "$@" "$path" 2>/dev/null)"
+    c="${out##*$'\n'}"
+    case "$c" in 2??) return 0 ;; esac
+    echo "Jellyfin 向导 $path 返回 ${c:-无响应}：$(head -c 150 <<<"${out%$'\n'*}")"
+    return 1
+  }
+  deadline=$((SECONDS + 200))
   while :; do
     code="$(jfx -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:8096/Startup/User 2>/dev/null)" || code=000
-    [ "$code" = 200 ] && break
-    tries=$((tries + 1))
-    if [ "$tries" -ge 70 ]; then
-      echo "Jellyfin 210 秒内没就绪（最后 $code）"
+    case "$code" in
+      200)
+        docker exec "$jf" rm -f /tmp/jf.jar
+        jfx_post http://localhost:8096/Startup/User \
+          -H 'Content-Type: application/json' \
+          -d "$(jq -nc --arg u "$SMOKE_OWNER" '{Name:$u,Password:"wonton-e2e-password"}')" || return 1
+        jfx_post http://localhost:8096/Startup/Configuration \
+          -H 'Content-Type: application/json' \
+          -d '{"ServerName":"Jellyfin","UICulture":"zh-CN","MetadataCountryCode":"CN","PreferredMetadataLanguage":"zh-cn"}' || return 1
+        jfx_post http://localhost:8096/Startup/RemoteAccess \
+          -H 'Content-Type: application/json' -d '{"EnableRemoteAccess":false}' || return 1
+        jfx_post http://localhost:8096/Startup/Complete -X POST || return 1
+        return 0 ;;
+      401) return 0 ;;
+    esac
+    if ((SECONDS >= deadline)); then
+      echo "Jellyfin 200 秒内没就绪（最后 $code）"
       docker ps -a --filter "name=$jf" --format '{{.Names}} {{.Status}}'
       docker logs --tail 3 "$jf" 2>&1
       return 1
     fi
     sleep 3
   done
-  docker exec "$jf" rm -f /tmp/jf.jar
-  jfx -H 'Content-Type: application/json' \
-    -d "{\"Name\":\"$SMOKE_OWNER\",\"Password\":\"wonton-e2e-password\"}" \
-    http://localhost:8096/Startup/User >/dev/null || return 1
-  jfx -H 'Content-Type: application/json' \
-    -d '{"ServerName":"Jellyfin","UICulture":"zh-CN","MetadataCountryCode":"CN","PreferredMetadataLanguage":"zh-cn"}' \
-    http://localhost:8096/Startup/Configuration >/dev/null || return 1
-  jfx -H 'Content-Type: application/json' -d '{"EnableRemoteAccess":false}' \
-    http://localhost:8096/Startup/RemoteAccess >/dev/null || return 1
-  jfx -X POST http://localhost:8096/Startup/Complete >/dev/null || return 1
 }
 
 # 完成一次真实的首次登录：Jellyfin 建主人管理员 → Seerr 向导登录 → 初始化。只在未初始化时执行。
 setup_seerr() {
   local res body
   jf_setup || return 1
-  body="$(jq -nc --arg u "$SMOKE_OWNER" --arg h "$(jellyfin_helper_name)" \
+  body="$(jq -nc --arg u "$SMOKE_OWNER" --arg h "$(jellyfin_helper_host)" \
     '{username:$u,password:"wonton-e2e-password",hostname:$h,port:8096,useSsl:false,urlBase:"",email:($u + "@example.com"),serverType:2}')"
   res="$(seerr_api /api/v1/auth/jellyfin -d "$body" 2>&1)" || {
     echo "Seerr 向导登录失败：$(head -c 200 <<<"${res:-空响应}")"; return 1;
