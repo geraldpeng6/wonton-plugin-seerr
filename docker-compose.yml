@@ -3,7 +3,7 @@ services:
   init:
     # 首次写入和每次重建时更新 Jellyfin 连接信息和发信配置（见 init/init-settings.js）。
     # 与主服务同一个官方镜像，避免再引入一个工具镜像。
-    image: ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
+    image: ghcr.io/seerr-team/seerr:v3.5.2@sha256:aadee014b40e28cf9aa4928bc9d1183a6eb08f8c44d543cddc9efdcb16549be2
     user: "${PUID}:${PGID}"
     entrypoint: ["node", "/seed/init-settings.js"]
     environment:
@@ -26,7 +26,7 @@ services:
         condition: service_completed_successfully
     # Seerr v3.5.1 官方多架构镜像（amd64、arm64）。
     # 官方镜像以 node 用户运行，这里跟随云吞注入的 PUID/PGID，数据目录属主与之一致。
-    image: ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
+    image: ghcr.io/seerr-team/seerr:v3.5.2@sha256:aadee014b40e28cf9aa4928bc9d1183a6eb08f8c44d543cddc9efdcb16549be2
     user: "${PUID}:${PGID}"
     environment:
       TZ: ${TZ}
@@ -49,7 +49,7 @@ services:
     depends_on:
       seerr:
         condition: service_healthy
-    image: ghcr.io/seerr-team/seerr:v3.5.1@sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
+    image: ghcr.io/seerr-team/seerr:v3.5.2@sha256:aadee014b40e28cf9aa4928bc9d1183a6eb08f8c44d543cddc9efdcb16549be2
     user: "${PUID}:${PGID}"
     entrypoint: ["node", "/seed/init-owner-email.js"]
     environment:
