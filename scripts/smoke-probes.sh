@@ -152,14 +152,11 @@ ensure_jellyfin() {
 # /tmp/jf.jar，四步共用。
 #
 # 建号等四步每步核对状态码：请求坏了当场报错，不能让 Seerr 拿着不存在的账号
-# 去登录。走完向导还要替 Seerr 先验一遍交给它的东西真能用：主人账号登得进去、
-# 刚发的令牌调得动要认证的接口。CI 实测（本仓库 #16 的 smoke）：向导刚走完
-# Seerr 就登录会拿到 500 "Something went wrong."——Jellyfin 12 对无效登录回
-# 500 而非 401（上游 #3523），Seerr 对非 401 的登录失败一概走默认兜底 500；
-# 夹具在就绪窗口里等登录和令牌认证真能用了再交。助手容器跨探针复用：
-# /Startup/User 回 401 说明向导早已完成，跳过四步直接做就绪检查。
+# 去登录。助手容器跨探针复用：/Startup/User 回 401 说明向导早已完成（向导的
+# Startup/Complete 一旦走过就不会回头），跳过四步直接算就绪；不改这里的话，
+# 一次向导登录失败会让后面每项探针都白等 210 秒再失败（#16 的 CI 实测三项连红）。
 jf_setup() {
-  local jf code kcode tries tok body deadline
+  local jf code deadline
   jf="$(jellyfin_helper_name)"
   ensure_jellyfin || return 1
   jfx() { docker exec "$jf" curl -sS --noproxy '*' -c /tmp/jf.jar -b /tmp/jf.jar "$@"; }
@@ -174,42 +171,29 @@ jf_setup() {
     return 1
   }
   deadline=$((SECONDS + 200))
-  tries=0
   while :; do
+    code="$(jfx -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:8096/Startup/User 2>/dev/null)" || code=000
+    case "$code" in
+      200)
+        docker exec "$jf" rm -f /tmp/jf.jar
+        jfx_post http://localhost:8096/Startup/User \
+          -H 'Content-Type: application/json' \
+          -d "$(jq -nc --arg u "$SMOKE_OWNER" '{Name:$u,Password:"wonton-e2e-password"}')" || return 1
+        jfx_post http://localhost:8096/Startup/Configuration \
+          -H 'Content-Type: application/json' \
+          -d '{"ServerName":"Jellyfin","UICulture":"zh-CN","MetadataCountryCode":"CN","PreferredMetadataLanguage":"zh-cn"}' || return 1
+        jfx_post http://localhost:8096/Startup/RemoteAccess \
+          -H 'Content-Type: application/json' -d '{"EnableRemoteAccess":false}' || return 1
+        jfx_post http://localhost:8096/Startup/Complete -X POST || return 1
+        return 0 ;;
+      401) return 0 ;;
+    esac
     if ((SECONDS >= deadline)); then
-      echo "Jellyfin 200 秒内没到可用（最后 $code）"
+      echo "Jellyfin 200 秒内没就绪（最后 $code）"
       docker ps -a --filter "name=$jf" --format '{{.Names}} {{.Status}}'
       docker logs --tail 3 "$jf" 2>&1
       return 1
     fi
-    code="$(jfx -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:8096/Startup/User 2>/dev/null)" || code=000
-    if [ "$code" = 200 ]; then
-      docker exec "$jf" rm -f /tmp/jf.jar
-      body="$(jq -nc --arg u "$SMOKE_OWNER" '{Name:$u,Password:"wonton-e2e-password"}')"
-      jfx_post http://localhost:8096/Startup/User \
-        -H 'Content-Type: application/json' -d "$body" || return 1
-      jfx_post http://localhost:8096/Startup/Configuration \
-        -H 'Content-Type: application/json' \
-        -d '{"ServerName":"Jellyfin","UICulture":"zh-CN","MetadataCountryCode":"CN","PreferredMetadataLanguage":"zh-cn"}' || return 1
-      jfx_post http://localhost:8096/Startup/RemoteAccess \
-        -H 'Content-Type: application/json' -d '{"EnableRemoteAccess":false}' || return 1
-      jfx_post http://localhost:8096/Startup/Complete -X POST || return 1
-    fi
-    if [ "$code" = 200 ] || [ "$code" = 401 ]; then
-      body="$(jq -nc --arg u "$SMOKE_OWNER" '{Username:$u,Pw:"wonton-e2e-password"}')"
-      tok="$(jfx -H 'Content-Type: application/json' -H 'Accept: application/json' \
-        -H 'Authorization: MediaBrowser Client="Seerr", Device="Seerr", DeviceId="BOT_seerr", Version="3.5.1"' \
-        -d "$body" http://localhost:8096/Users/AuthenticateByName 2>/dev/null |
-        jq -r '.AccessToken // empty' 2>/dev/null)"
-      if [[ -n "$tok" ]]; then
-        kcode="$(jfx -o /dev/null -w '%{http_code}' --max-time 5 \
-          -H "Authorization: MediaBrowser Client=\"Seerr\", Device=\"Seerr\", DeviceId=\"BOT_seerr\", Version=\"3.5.1\", Token=\"$tok\"" \
-          http://localhost:8096/Auth/Keys 2>/dev/null)" || kcode=000
-        [ "$kcode" = 200 ] && return 0
-      fi
-    fi
-    tries=$((tries + 1))
-    ((tries % 20 == 0)) && echo "Jellyfin 就绪检查第 $tries 轮：向导码 $code，登录令牌 ${tok:+拿到}${tok:-没拿到}"
     sleep 3
   done
 }
